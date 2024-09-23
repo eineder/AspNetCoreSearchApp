@@ -12,5 +12,11 @@ namespace AspNetCoreSearchApp.Models
 
         [Required]
         public string JsonData { get; set; } // Store JSON data as string
+
+        // Foreign key to reference the schema
+        public int JsonSchemaId { get; set; }
+
+        // Navigation property
+        public JsonSchema JsonSchema { get; set; }
     }
 }

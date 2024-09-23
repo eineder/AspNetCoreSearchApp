@@ -1,13 +1,10 @@
-using AspNetCoreSearchApp.Models;
 using AspNetCoreSearchApp.Data;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using System.Collections.Generic;
-using System.Linq;
+using Newtonsoft.Json.Linq;
 
 namespace MyApp.Controllers
 {
-
 
     [Route("api/[controller]")]
     [ApiController]
@@ -26,9 +23,9 @@ namespace MyApp.Controllers
                 {
                     { "equals", new Operator { Name = "equals", SqlOperator = (value) => $"= '{value}'" } },
                     { "not-equals", new Operator { Name = "not-equals", SqlOperator = (value) => $"<> '{value}'" } },
-                    { "startsWith", new Operator { Name = "startsWith", SqlOperator = (value) => $"LIKE {value}%" } },
-                    { "endsWith", new Operator { Name = "endsWith", SqlOperator = (value) => $"LIKE %{value}" } },
-                    { "contains", new Operator { Name = "contains", SqlOperator = (value) => $"LIKE %{value}%" } }
+                    { "startsWith", new Operator { Name = "startsWith", SqlOperator = (value) => $"LIKE '{value}%'" } },
+                    { "endsWith", new Operator { Name = "endsWith", SqlOperator = (value) => $"LIKE '%{value}'" } },
+                    { "contains", new Operator { Name = "contains", SqlOperator = (value) => $"LIKE '%{value}%'" } }
                 }
             },
             { "number", new Dictionary<string, Operator>
@@ -57,73 +54,106 @@ namespace MyApp.Controllers
             _context = context;
         }
 
+        [HttpGet("types")]
+        public ActionResult<IEnumerable<string>> GetJsonSchemas()
+        {
+            var schemas = _context.JsonSchemas.Select(p => p.SchemaName).ToList();
+            return Ok(schemas);
+        }
+
+
         // POST: api/JsonDocuments/filter
         [HttpPost("filter")]
-        public ActionResult<IEnumerable<JsonDoc>> FilterJsonDocuments([FromBody] List<FilterCriteria> filters)
+        public ActionResult<IEnumerable<object>> FilterJsonDocuments([FromBody] Filter filter)
         {
-            var query = BuildSqlQuery(filters);
+            var query = BuildSqlQuery(filter);
 
             var results = _context.JsonDocuments
                 .FromSqlRaw(query)
+                .Select(p => new
+                {
+                    p.Id,
+                    p.DocumentName,
+                    p.JsonData
+                })
                 .ToList();
 
             return results;
         }
 
-        private string BuildSqlQuery(List<FilterCriteria> filters)
+        private string BuildSqlQuery(Filter filter)
         {
+            var schema = _context.JsonSchemas.Single(js => js.SchemaName == filter.Type);
+            var schemaJson = JObject.Parse(schema.SchemaData);
+            var properties = schemaJson["properties"];
+
+            if (properties == null)
+                throw new ArgumentException("Invalid schema: 'properties' not found");
+
             var whereClauses = new List<string>();
 
-            foreach (var filter in filters)
+            foreach (var criteria in filter.Criteria)
             {
-                var sqlOperator = GetSqlOperator(filter.Operator);
-                var value = filter.Value;
+                var sqlOperation = GetSqlOperation(criteria.Field, criteria.Operator, properties, criteria.Value);
 
-                if (filter.Operator == "startsWith")
-                {
-                    value = $"{value}%";
-                }
-                else if (filter.Operator == "endsWith")
-                {
-                    value = $"%{value}";
-                }
-                else if (filter.Operator == "contains")
-                {
-                    value = $"%{value}%";
-                }
-
-                var clause = $"json_extract(JsonData, '$.{filter.Field}') {sqlOperator} '{value}'";
+                var clause = $"json_extract(JsonData, '$.{criteria.Field}') {sqlOperation}";
                 whereClauses.Add(clause);
             }
 
-            var whereSql = string.Join(" AND ", whereClauses);
-            var query = $"SELECT * FROM JsonDocuments WHERE {whereSql}";
+            var whereSql = string.Join(" AND ", whereClauses.Prepend("1 = 1"));
+            var query = $"SELECT * FROM JsonDocuments where {whereSql}";
 
             return query;
         }
 
-        private string GetSqlOperator(string operatorString)
+        private string GetSqlOperation(string fieldName, string operatorName, JToken properties, string value)
         {
-            return operatorString switch
-            {
-                "equals" => "=",
-                "not-equals" => "!=",
-                "greater-than" => ">",
-                "less-than" => "<",
-                "greater-equal" => ">=",
-                "less-equal" => "<=",
-                "startsWith" => "LIKE",
-                "endsWith" => "LIKE",
-                "contains" => "LIKE",
-                _ => throw new ArgumentException($"Unknown operator: {operatorString}")
-            };
-        }
-    }
+            var type = GetType(fieldName, properties);
 
-    public class FilterCriteria
-    {
-        public string Field { get; set; }
-        public string Operator { get; set; }
-        public string Value { get; set; }
+            if (!searchTypes.TryGetValue(type, out var operators))
+                throw new ArgumentException($"Unknown type: {type}");
+
+            if (!operators.TryGetValue(operatorName, out var operation))
+                throw new ArgumentException($"Unknown operator: {operatorName}");
+
+            return operation.SqlOperator(value);
+        }
+
+        private static string GetType(string fieldName, JToken properties)
+        {
+            var field = properties[fieldName];
+
+            if (field == null)
+                throw new ArgumentException($"Field '{fieldName}' not found in schema");
+
+            var fieldType = field["type"]?.ToString();
+
+            if (string.IsNullOrEmpty(fieldType))
+                throw new ArgumentException($"Type for field '{fieldName}' not found in schema");
+
+            return fieldType;
+        }
+
+        public class Filter
+        {
+            /// <summary>
+            /// The schema type to filter
+            /// </summary>
+            /// <example>Person</example>
+            public string Type { get; set; }
+
+            /// <summary>
+            /// The filter criteria
+            /// </summary>
+            /// <example>[{"Field":"name","Operator":"startsWith","Value":"Jo"}]</example>
+            public List<FilterCriteria> Criteria { get; set; }
+        }
+
+        public class FilterCriteria
+        {
+            public string Field { get; set; }
+            public string Operator { get; set; }
+            public string Value { get; set; }
+        }
     }
 }
